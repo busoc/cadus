@@ -36,11 +36,23 @@ type Counter struct {
 	Last  uint32
 }
 
+const pattern = "%9d | %x | %x | %x | %x | %12d | %12d"
+
 func main() {
 	log.SetOutput(os.Stdout)
 	log.SetFlags(0)
+	debug := flag.Bool("g", false, "dump packet headers")
 	hrdfe := flag.Bool("hrdfe", false, "hrdfe packet")
 	flag.Parse()
+
+	var hook hookFunc
+	if *debug {
+		hook = func(i int, vs []byte) {
+			z := binary.LittleEndian.Uint32(vs[4:])
+			sum := vs[len(vs)-4:]
+			log.Printf(pattern, i, vs[:8], vs[8:24], vs[24:48], sum, z, len(vs)-12)
+		}
+	}
 
 	var rs []io.Reader
 	for _, a := range flag.Args() {
@@ -51,14 +63,16 @@ func main() {
 		defer r.Close()
 		rs = append(rs, r)
 	}
-	z, err := reassemble(io.MultiReader(rs...), *hrdfe)
+	z, err := reassemble(io.MultiReader(rs...), *hrdfe, hook)
 	if err != nil {
 		log.Fatalln(err)
 	}
 	log.Printf("%d VMU packets (%d bad, %dKB)", z.Count, z.Bad, z.Size>>10)
 }
 
-func reassemble(r io.Reader, hrdfe bool) (*Coze, error) {
+type hookFunc func(int, []byte)
+
+func reassemble(r io.Reader, hrdfe bool, hook hookFunc) (*Coze, error) {
 	rs := NewReader(r, hrdfe)
 
 	var z Coze
@@ -81,6 +95,9 @@ func reassemble(r io.Reader, hrdfe bool) (*Coze, error) {
 		}
 		if i := bytes.Index(vs, Word); i >= len(Word) {
 			return nil, fmt.Errorf("multiple vmu packets")
+		}
+		if hook != nil {
+			hook(i, vs)
 		}
 		z.Count++
 		z.Size += n
@@ -196,12 +213,6 @@ func (r *reader) Read(bs []byte) (int, error) {
 			offset = len(Word)
 		}
 		if ix := bytes.Index(xs[offset:], Word); ix >= 0 {
-			// z := binary.LittleEndian.Uint32(xs[len(Word):])
-			// log.Printf("hrdl: %x %8d - vmu: %x - rest: %x", xs[:8], z, xs[8:24], xs[24:48])
-			// if int(z) >= len(xs) {
-			// 	xs = xs[offset+ix:]
-			// 	continue
-			// }
 			n := copy(bs, xs[:offset+ix])
 			r.rest.Write(xs[offset+ix:])
 			return n, nil
