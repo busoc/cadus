@@ -33,13 +33,16 @@ var (
 type hookFunc func(int, []byte)
 
 type Coze struct {
-	Count int
-	Size  int
-	Bad   int
-	Error int
+	Count   int
+	Size    int
+	Bad     int
+	Bigger  int
+	Smaller int
 }
 
 type Counter struct {
+	Count   uint64
+	Size    uint64
 	Missing uint64
 	First   uint32
 	Last    uint32
@@ -47,13 +50,13 @@ type Counter struct {
 
 const (
 	rawPattern    = "%9d | %x | %x | %x | %x | %12d | %12d"
-	fieldsPattern = "%9d | %x | %12d - %12d | %02x | %s | %12d | %s | %s | %02x | %12d | %2d | %2d | %6d | %s"
+	fieldsPattern = "%9d | %x | %8d - %8d | %02x | %s | %12d | %5d | %s | %s | %02x | %12d | %2d | %2d | %6d | %s"
 )
 
 func main() {
 	log.SetOutput(os.Stdout)
 	log.SetFlags(0)
-	debug := flag.String("g", "", "dump packet headers")
+	debug := flag.String("debug", "", "dump packet headers")
 	hrdfe := flag.Bool("hrdfe", false, "hrdfe packet")
 	flag.Parse()
 
@@ -61,7 +64,7 @@ func main() {
 	switch *debug {
 	case "raw":
 		hook = debugRaw
-	case "fields":
+	case "header":
 		hook = debugFields()
 	default:
 	}
@@ -79,6 +82,7 @@ func main() {
 	if err != nil {
 		log.Fatalln(err)
 	}
+	log.Println()
 	log.Printf("%d VMU packets (%d bad, %dKB)", z.Count, z.Bad, z.Size>>10)
 }
 
@@ -90,7 +94,9 @@ func debugRaw(i int, vs []byte) {
 
 func debugFields() hookFunc {
 	deltas := make(map[uint8]uint32)
+	gaps := make(map[uint8]uint32)
 	return func(i int, vs []byte) {
+		// HRDL Frame Header
 		var (
 			sync     uint32
 			size     uint32
@@ -125,9 +131,9 @@ func debugFields() hookFunc {
 		binary.Read(r, binary.LittleEndian, &auxtime)
 		binary.Read(r, binary.LittleEndian, &origin)
 
-		at := GPS.Add(acqtime).Format("2006-02-01 15:04:05.000")
-		xt := GPS.Add(auxtime).Format("2006-02-01 15:04:05.000")
-		vt := readTime6(coarse, fine).Add(Delta).Format("2006-02-01 15:04:05.000")
+		at := GPS.Add(acqtime).Format("2006-01-02 15:04:05.000")
+		xt := GPS.Add(auxtime).Format("2006-01-02 15:04:05.000")
+		vt := readTime6(coarse, fine).Add(Delta).Format("2006-01-02 15:04:05.000")
 
 		tp, st := property>>4, property&0xF
 		var upi string
@@ -143,12 +149,16 @@ func debugFields() hookFunc {
 			upi = "UNKNOWN"
 		}
 
-		var delta uint32
+		var delta, gap uint64
 		if prev, ok := deltas[origin]; ok && prev+1 != counter {
-			delta = counter - prev
+			delta = sequenceDelta(counter, prev)
 		}
-		log.Printf(fieldsPattern, i, sync, size, len(vs)-12, channel, vt, sequence, at, xt, origin, counter, tp, st, delta, upi)
+		if prev, ok := gaps[channel]; ok && prev+1 != sequence {
+			gap = sequenceDelta(sequence, prev)
+		}
+		log.Printf(fieldsPattern, i, sync, size, len(vs)-12, channel, vt, sequence, gap, at, xt, origin, counter, tp, st, delta, upi)
 		deltas[origin] = counter
+		gaps[channel] = sequence
 	}
 }
 
@@ -211,28 +221,25 @@ func reassemble(r io.Reader, hrdfe bool, hook hookFunc) (*Coze, error) {
 			c.Bad++
 			z.Bad++
 		}
-		if z := binary.LittleEndian.Uint32(vs[4:]); int(z) != len(vs)-12 {
-			c.Error++
+		switch z, n := binary.LittleEndian.Uint32(vs[4:]), len(vs)-12; {
+		default:
+		case int(z) > n:
+			c.Smaller++
+		case int(z) < n:
+			c.Bigger++
 		}
-
 		counts[vs[47]] = c
 
 		// check missing vmu packets
 		v, ok := channels[vs[8]]
-		if vmuseq := uint32(binary.LittleEndian.Uint16(vs[12:])); !ok {
+		if vmuseq := binary.LittleEndian.Uint32(vs[12:]); !ok {
 			v = &Counter{First: vmuseq, Last: vmuseq}
 		} else {
-			if vmuseq != v.Last+1 {
-				var delta uint64
-				if vmuseq > v.Last {
-					delta = uint64(vmuseq - v.Last)
-				} else {
-					//TBD
-				}
-				v.Missing += delta
-			}
+			v.Missing += sequenceDelta(vmuseq, v.Last)
 			v.Last = vmuseq
 		}
+		v.Count++
+		// v.Size += len(vs)
 		channels[vs[8]] = v
 
 		// check missing hrd packets by origins
@@ -240,34 +247,36 @@ func reassemble(r io.Reader, hrdfe bool, hook hookFunc) (*Coze, error) {
 		if oriseq := binary.LittleEndian.Uint32(vs[27:]); !ok {
 			o = &Counter{First: oriseq, Last: oriseq}
 		} else {
-			if oriseq != o.Last+1 {
-				var delta uint64
-				if oriseq > v.Last {
-					delta = uint64(oriseq - v.Last)
-				} else {
-					//TBD
-				}
-				o.Missing += delta
-			}
+			o.Missing += sequenceDelta(oriseq, o.Last)
 			o.Last = oriseq
 		}
 		origins[vs[47]] = o
 	}
 	log.Println("count packets by origin")
 	for b, c := range counts {
-		log.Printf("origin %02x = %8d: %6d bad, %8d length error, %9dKB", b, c.Count, c.Bad, c.Error, c.Size>>10)
+		log.Printf("origin %02x = %8d: %6d bad, %8d length error (big: %6d, small: %6d), %9dKB", b, c.Count, c.Bad, c.Bigger+c.Smaller, c.Bigger, c.Smaller, c.Size>>10)
 	}
 	log.Println()
 	log.Println("sequence check by origin")
 	for b, c := range origins {
-		log.Printf("origin %02x: first: %10d - last: %10d - missing: ~%10d", b, c.First, c.Last, c.Missing)
+		log.Printf("origin %02x: first: %10d - last: %10d - missing: %10d", b, c.First, c.Last, c.Missing)
 	}
 	log.Println()
 	log.Println("sequence check by channel")
 	for b, c := range channels {
-		log.Printf("channel %02x: first: %10d - last: %10d - missing: ~%10d", b, c.First, c.Last, c.Missing)
+		log.Printf("channel %02x: first: %10d - last: %10d - missing: %10d", b, c.First, c.Last, c.Missing)
 	}
 	return &z, nil
+}
+
+func sequenceDelta(current, last uint32) uint64 {
+	if current == last + 1 {
+		return 0
+	}
+	if current > last{
+		return uint64(current) - uint64(last)
+	}
+	return 0
 }
 
 type reader struct {
