@@ -283,31 +283,34 @@ func decodeFromUDP(addr string) (<-chan *TimeCadu, error) {
 func decodeFromFile(paths []string, hrdfe bool) (<-chan *TimeCadu, error) {
 	q := make(chan *TimeCadu, 100)
 	go func() {
-		defer close(q)
+		var rs []io.Reader
 		for _, p := range paths {
 			r, err := os.Open(p)
 			if err != nil {
-				continue
+				return
 			}
-			for {
-				n := time.Now()
-				if hrdfe {
-					var (
-						coarse uint32
-						fine   uint32
-					)
-					binary.Read(r, binary.LittleEndian, &coarse)
-					binary.Read(r, binary.LittleEndian, &fine)
+			defer r.Close()
+			rs = append(rs, r)
+		}
+		r := io.MultiReader(rs...)
+		defer close(q)
+		for {
+			n := time.Now()
+			if hrdfe {
+				var (
+					coarse uint32
+					fine   uint32
+				)
+				binary.Read(r, binary.LittleEndian, &coarse)
+				binary.Read(r, binary.LittleEndian, &fine)
 
-					n = time.Unix(int64(coarse), int64(fine)*1000)
-				}
-				c, err := decodeCadu(r)
-				if err != nil {
-					r.Close()
-					break
-				}
-				q <- &TimeCadu{Reception: n, Cadu: c}
+				n = time.Unix(int64(coarse), int64(fine)*1000)
 			}
+			c, err := decodeCadu(r)
+			if err != nil {
+				break
+			}
+			q <- &TimeCadu{Reception: n, Cadu: c}
 		}
 	}()
 	return q, nil

@@ -39,7 +39,7 @@ type Counter struct {
 
 const (
 	rawPattern    = "%9d | %x | %x | %x | %x | %12d | %12d | %d"
-	fieldsPattern = "%x | %12d | %02x | %s | %12d | %s | %s | %02x | %12d | %2d | %2d"
+	fieldsPattern = "%x | %12d - %12d | %02x | %s | %12d | %s | %s | %02x | %12d | %2d | %2d"
 )
 
 func main() {
@@ -124,7 +124,7 @@ func debugFields(i int, vs []byte) {
 
 	tp, st := property>>4, property&0xF
 
-	log.Printf(fieldsPattern, sync, size, channel, vt, sequence, at, xt, origin, counter, tp, st)
+	log.Printf(fieldsPattern, sync, size, len(vs)-12, channel, vt, sequence, at, xt, origin, counter, tp, st)
 
 }
 
