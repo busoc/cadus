@@ -188,7 +188,9 @@ Loop:
 func printCadus(queue <-chan *TimeCadu) {
 	var (
 		prev  *TimeCadu
-		count int
+		count     int
+		corrupted int
+		missing   int
 		total time.Duration
 	)
 	for c := range queue {
@@ -197,7 +199,9 @@ func printCadus(queue <-chan *TimeCadu) {
 		err := "-"
 		if c.Error != nil {
 			err = c.Error.Error()
+			corrupted++
 		}
+		missing += int(delta)
 		count++
 
 		log.Printf("%8d | %s | %18s | %18s | %04x | %-3d | %-3d | %-3d | %-12d | %6t | %04x | %04x | %04x | %4d | %s",
@@ -219,6 +223,7 @@ func printCadus(queue <-chan *TimeCadu) {
 		)
 		prev = c
 	}
+	log.Printf("%d cadus found (%d missing, %d corrupted - total time %s)", count, missing, corrupted, total)
 }
 
 func decodeFromTCP(addr string) (<-chan *TimeCadu, error) {
