@@ -35,6 +35,12 @@ var (
 	HRDLMagic = []byte{0xf8, 0x2e, 0x35, 0x53}
 )
 
+var (
+	GPS   = time.Date(1980, 1, 6, 0, 0, 0, 0, time.UTC)
+	UNIX  = time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
+	Delta = GPS.Sub(UNIX)
+)
+
 const TimeFormat = "2006-01-02 15:04:05.000"
 
 type ChecksumError struct {
@@ -304,7 +310,7 @@ func decodeFromFile(paths []string, hrdfe bool) (<-chan *TimeCadu, error) {
 				binary.Read(r, binary.LittleEndian, &coarse)
 				binary.Read(r, binary.LittleEndian, &fine)
 
-				n = time.Unix(int64(coarse), int64(fine)*1000)
+				n = time.Unix(int64(coarse), int64(fine)*1000).Add(Delta)
 			}
 			c, err := decodeCadu(r)
 			if err != nil {
