@@ -4,8 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"flag"
-	"fmt"
 	"io"
 	"log"
 	"os"
@@ -20,9 +20,17 @@ const (
 )
 
 var (
+	GPS   = time.Date(1980, 1, 6, 0, 0, 0, 0, time.UTC)
+	UNIX  = time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
+	Delta = GPS.Sub(UNIX)
+)
+
+var (
 	empty = make([]byte, caduBodyLen)
 	Word  = []byte{0xf8, 0x2e, 0x35, 0x53}
 )
+
+type hookFunc func(int, []byte)
 
 type Coze struct {
 	Count int
@@ -32,14 +40,14 @@ type Coze struct {
 }
 
 type Counter struct {
-	Missing uint32
+	Missing uint64
 	First   uint32
 	Last    uint32
 }
 
 const (
-	rawPattern    = "%9d | %x | %x | %x | %x | %12d | %12d | %d"
-	fieldsPattern = "%x | %12d - %12d | %02x | %s | %12d | %s | %s | %02x | %12d | %2d | %2d"
+	rawPattern    = "%9d | %x | %x | %x | %x | %12d | %12d"
+	fieldsPattern = "%9d | %x | %12d - %12d | %02x | %s | %12d | %s | %s | %02x | %12d | %2d | %2d | %6d | %s"
 )
 
 func main() {
@@ -54,7 +62,7 @@ func main() {
 	case "raw":
 		hook = debugRaw
 	case "fields":
-		hook = debugFields
+		hook = debugFields()
 	default:
 	}
 
@@ -74,58 +82,74 @@ func main() {
 	log.Printf("%d VMU packets (%d bad, %dKB)", z.Count, z.Bad, z.Size>>10)
 }
 
-type hookFunc func(int, []byte)
-
 func debugRaw(i int, vs []byte) {
 	z := binary.LittleEndian.Uint32(vs[4:])
 	sum := vs[len(vs)-4:]
 	log.Printf(rawPattern, i, vs[:8], vs[8:24], vs[24:48], sum, z, len(vs)-12)
 }
 
-func debugFields(i int, vs []byte) {
-	var (
-		sync     uint32
-		size     uint32
-		channel  uint8
-		source   uint8
-		sequence uint32
-		coarse   uint32
-		fine     uint16
-		spare    uint16
-		property uint8
-		stream   uint16
-		counter  uint32
-		acqtime  time.Duration
-		auxtime  time.Duration
-		origin   uint8
-	)
+func debugFields() hookFunc {
+	deltas := make(map[uint8]uint32)
+	return func(i int, vs []byte) {
+		var (
+			sync     uint32
+			size     uint32
+			channel  uint8
+			source   uint8
+			sequence uint32
+			coarse   uint32
+			fine     uint16
+			spare    uint16
+			property uint8
+			stream   uint16
+			counter  uint32
+			acqtime  time.Duration
+			auxtime  time.Duration
+			origin   uint8
+		)
 
-	r := bytes.NewReader(vs)
-	binary.Read(r, binary.BigEndian, &sync)
-	binary.Read(r, binary.LittleEndian, &size)
-	binary.Read(r, binary.LittleEndian, &channel)
-	binary.Read(r, binary.LittleEndian, &source)
-	binary.Read(r, binary.LittleEndian, &spare)
-	binary.Read(r, binary.LittleEndian, &sequence)
-	binary.Read(r, binary.LittleEndian, &coarse)
-	binary.Read(r, binary.LittleEndian, &fine)
-	binary.Read(r, binary.LittleEndian, &spare)
-	binary.Read(r, binary.LittleEndian, &property)
-	binary.Read(r, binary.LittleEndian, &stream)
-	binary.Read(r, binary.LittleEndian, &counter)
-	binary.Read(r, binary.LittleEndian, &acqtime)
-	binary.Read(r, binary.LittleEndian, &auxtime)
-	binary.Read(r, binary.LittleEndian, &origin)
+		r := bytes.NewReader(vs)
+		binary.Read(r, binary.BigEndian, &sync)
+		binary.Read(r, binary.LittleEndian, &size)
+		binary.Read(r, binary.LittleEndian, &channel)
+		binary.Read(r, binary.LittleEndian, &source)
+		binary.Read(r, binary.LittleEndian, &spare)
+		binary.Read(r, binary.LittleEndian, &sequence)
+		binary.Read(r, binary.LittleEndian, &coarse)
+		binary.Read(r, binary.LittleEndian, &fine)
+		binary.Read(r, binary.LittleEndian, &spare)
+		binary.Read(r, binary.LittleEndian, &property)
+		binary.Read(r, binary.LittleEndian, &stream)
+		binary.Read(r, binary.LittleEndian, &counter)
+		binary.Read(r, binary.LittleEndian, &acqtime)
+		binary.Read(r, binary.LittleEndian, &auxtime)
+		binary.Read(r, binary.LittleEndian, &origin)
 
-	epoch := time.Date(1980, 1, 6, 0, 0, 0, 0, time.UTC)
-	at := epoch.Add(acqtime).Format("2006-02-01 15:04:05.000")
-	xt := epoch.Add(auxtime).Format("2006-02-01 15:04:05.000")
-	vt := readTime6(coarse, fine).Format("2006-02-01 15:04:05.000")
+		at := GPS.Add(acqtime).Format("2006-02-01 15:04:05.000")
+		xt := GPS.Add(auxtime).Format("2006-02-01 15:04:05.000")
+		vt := readTime6(coarse, fine).Add(Delta).Format("2006-02-01 15:04:05.000")
 
-	tp, st := property>>4, property&0xF
+		tp, st := property>>4, property&0xF
+		var upi string
+		switch bs := make([]byte, 32); tp {
+		case 1:
+			io.ReadFull(r, bs)
+			upi = string(bytes.Trim(bs, "\x00"))
+		case 2:
+			io.ReadFull(r, make([]byte, 20))
+			io.ReadFull(r, bs)
+			upi = string(bytes.Trim(bs, "\x00"))
+		default:
+			upi = "UNKNOWN"
+		}
 
-	log.Printf(fieldsPattern, sync, size, len(vs)-12, channel, vt, sequence, at, xt, origin, counter, tp, st)
-
+		var delta uint32
+		if prev, ok := deltas[origin]; ok && prev+1 != counter {
+			delta = counter - prev
+		}
+		log.Printf(fieldsPattern, i, sync, size, len(vs)-12, channel, vt, sequence, at, xt, origin, counter, tp, st, delta, upi)
+		deltas[origin] = counter
+	}
 }
 
 func readTime6(coarse uint32, fine uint16) time.Time {
@@ -135,6 +159,11 @@ func readTime6(coarse uint32, fine uint16) time.Time {
 	ms := time.Duration(fs) * time.Millisecond
 	return t.Add(ms).UTC()
 }
+
+var (
+	ErrSyncword = errors.New("missing syncword")
+	ErrMultiple = errors.New("multiple syncword")
+)
 
 func reassemble(r io.Reader, hrdfe bool, hook hookFunc) (*Coze, error) {
 	rs := NewReader(r, hrdfe)
@@ -155,10 +184,10 @@ func reassemble(r io.Reader, hrdfe bool, hook hookFunc) (*Coze, error) {
 		}
 		vs := xs[:n]
 		if !bytes.Equal(vs[:len(Word)], Word) {
-			return nil, fmt.Errorf("missing sync word")
+			return nil, ErrSyncword
 		}
 		if i := bytes.Index(vs, Word); i >= len(Word) {
-			return nil, fmt.Errorf("multiple vmu packets")
+			return nil, ErrMultiple
 		}
 		if hook != nil {
 			hook(i, vs)
@@ -190,25 +219,35 @@ func reassemble(r io.Reader, hrdfe bool, hook hookFunc) (*Coze, error) {
 
 		// check missing vmu packets
 		v, ok := channels[vs[8]]
-		vmuseq := uint32(binary.LittleEndian.Uint16(vs[12:]))
-		if !ok {
+		if vmuseq := uint32(binary.LittleEndian.Uint16(vs[12:])); !ok {
 			v = &Counter{First: vmuseq, Last: vmuseq}
 		} else {
 			if vmuseq != v.Last+1 {
-				v.Missing += vmuseq - v.Last
+				var delta uint64
+				if vmuseq > v.Last {
+					delta = uint64(vmuseq - v.Last)
+				} else {
+					//TBD
+				}
+				v.Missing += delta
 			}
 			v.Last = vmuseq
 		}
 		channels[vs[8]] = v
 
-		// check missing hrd packets by orgins
+		// check missing hrd packets by origins
 		o, ok := origins[vs[47]]
-		oriseq := binary.LittleEndian.Uint32(vs[27:])
-		if !ok {
+		if oriseq := binary.LittleEndian.Uint32(vs[27:]); !ok {
 			o = &Counter{First: oriseq, Last: oriseq}
 		} else {
 			if oriseq != o.Last+1 {
-				o.Missing += oriseq - o.Last
+				var delta uint64
+				if oriseq > v.Last {
+					delta = uint64(oriseq - v.Last)
+				} else {
+					//TBD
+				}
+				o.Missing += delta
 			}
 			o.Last = oriseq
 		}
@@ -221,12 +260,12 @@ func reassemble(r io.Reader, hrdfe bool, hook hookFunc) (*Coze, error) {
 	log.Println()
 	log.Println("sequence check by origin")
 	for b, c := range origins {
-		log.Printf("origin %02x: first: %10d - last: %10d - missing: %10d", b, c.First, c.Last, c.Missing)
+		log.Printf("origin %02x: first: %10d - last: %10d - missing: ~%10d", b, c.First, c.Last, c.Missing)
 	}
 	log.Println()
 	log.Println("sequence check by channel")
 	for b, c := range channels {
-		log.Printf("channel %02x: first: %10d - last: %10d - missing: %10d", b, c.First, c.Last, c.Missing)
+		log.Printf("channel %02x: first: %10d - last: %10d - missing: ~%10d", b, c.First, c.Last, c.Missing)
 	}
 	return &z, nil
 }
@@ -251,8 +290,10 @@ func NewReader(r io.Reader, hrdfe bool) io.Reader {
 const defaultOffset = caduBodyLen + 4
 
 func (r *reader) Read(bs []byte) (int, error) {
-	xs := r.rest.Bytes()
-	r.rest.Reset()
+	xs := make([]byte, r.rest.Len(), len(bs))
+	if _, err := io.ReadFull(r.rest, xs); err != nil {
+		return 0, err
+	}
 	if len(xs) > 8 && bytes.Equal(xs[:len(Word)], Word) {
 		if ix := bytes.Index(xs[len(Word):], Word); ix >= 0 {
 			n := copy(bs, xs[:ix+len(Word)])
@@ -294,5 +335,5 @@ func (r *reader) readCadu() ([]byte, error) {
 	if _, err := io.ReadFull(r.inner, vs); err != nil {
 		return nil, err
 	}
-	return vs[r.skip+caduHeaderLen : caduPacketLen-caduCheckLen], nil
+	return vs[r.skip+caduHeaderLen : r.skip+caduPacketLen-caduCheckLen], nil
 }
