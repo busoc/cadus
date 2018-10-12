@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"time"
 )
 
 const (
@@ -32,26 +33,29 @@ type Coze struct {
 
 type Counter struct {
 	Missing uint32
-	First uint32
-	Last  uint32
+	First   uint32
+	Last    uint32
 }
 
-const pattern = "%9d | %x | %x | %x | %x | %12d | %12d"
+const (
+	rawPattern    = "%9d | %x | %x | %x | %x | %12d | %12d | %d"
+	fieldsPattern = "%x | %12d | %02x | %s | %12d | %s | %s | %02x | %12d | %2d | %2d"
+)
 
 func main() {
 	log.SetOutput(os.Stdout)
 	log.SetFlags(0)
-	debug := flag.Bool("g", false, "dump packet headers")
+	debug := flag.String("g", "", "dump packet headers")
 	hrdfe := flag.Bool("hrdfe", false, "hrdfe packet")
 	flag.Parse()
 
 	var hook hookFunc
-	if *debug {
-		hook = func(i int, vs []byte) {
-			z := binary.LittleEndian.Uint32(vs[4:])
-			sum := vs[len(vs)-4:]
-			log.Printf(pattern, i, vs[:8], vs[8:24], vs[24:48], sum, z, len(vs)-12)
-		}
+	switch *debug {
+	case "raw":
+		hook = debugRaw
+	case "fields":
+		hook = debugFields
+	default:
 	}
 
 	var rs []io.Reader
@@ -71,6 +75,66 @@ func main() {
 }
 
 type hookFunc func(int, []byte)
+
+func debugRaw(i int, vs []byte) {
+	z := binary.LittleEndian.Uint32(vs[4:])
+	sum := vs[len(vs)-4:]
+	log.Printf(rawPattern, i, vs[:8], vs[8:24], vs[24:48], sum, z, len(vs)-12)
+}
+
+func debugFields(i int, vs []byte) {
+	var (
+		sync     uint32
+		size     uint32
+		channel  uint8
+		source   uint8
+		sequence uint32
+		coarse   uint32
+		fine     uint16
+		spare    uint16
+		property uint8
+		stream   uint16
+		counter  uint32
+		acqtime  time.Duration
+		auxtime  time.Duration
+		origin   uint8
+	)
+
+	r := bytes.NewReader(vs)
+	binary.Read(r, binary.BigEndian, &sync)
+	binary.Read(r, binary.LittleEndian, &size)
+	binary.Read(r, binary.LittleEndian, &channel)
+	binary.Read(r, binary.LittleEndian, &source)
+	binary.Read(r, binary.LittleEndian, &spare)
+	binary.Read(r, binary.LittleEndian, &sequence)
+	binary.Read(r, binary.LittleEndian, &coarse)
+	binary.Read(r, binary.LittleEndian, &fine)
+	binary.Read(r, binary.LittleEndian, &spare)
+	binary.Read(r, binary.LittleEndian, &property)
+	binary.Read(r, binary.LittleEndian, &stream)
+	binary.Read(r, binary.LittleEndian, &counter)
+	binary.Read(r, binary.LittleEndian, &acqtime)
+	binary.Read(r, binary.LittleEndian, &auxtime)
+	binary.Read(r, binary.LittleEndian, &origin)
+
+	epoch := time.Date(1980, 1, 6, 0, 0, 0, 0, time.UTC)
+	at := epoch.Add(acqtime).Format("2006-02-01 15:04:05.000")
+	xt := epoch.Add(auxtime).Format("2006-02-01 15:04:05.000")
+	vt := readTime6(coarse, fine).Format("2006-02-01 15:04:05.000")
+
+	tp, st := property>>4, property&0xF
+
+	log.Printf(fieldsPattern, sync, size, channel, vt, sequence, at, xt, origin, counter, tp, st)
+
+}
+
+func readTime6(coarse uint32, fine uint16) time.Time {
+	t := time.Unix(int64(coarse), 0).UTC()
+
+	fs := float64(fine) / 65536.0 * 1000.0
+	ms := time.Duration(fs) * time.Millisecond
+	return t.Add(ms).UTC()
+}
 
 func reassemble(r io.Reader, hrdfe bool, hook hookFunc) (*Coze, error) {
 	rs := NewReader(r, hrdfe)
