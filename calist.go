@@ -187,11 +187,11 @@ Loop:
 
 func printCadus(queue <-chan *TimeCadu) {
 	var (
-		prev  *TimeCadu
+		prev      *TimeCadu
 		count     int
 		corrupted int
 		missing   int
-		total time.Duration
+		total     time.Duration
 	)
 	for c := range queue {
 		delta, elapsed := c.Missing(prev), c.Elapsed(prev)
