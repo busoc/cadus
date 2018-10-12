@@ -49,8 +49,8 @@ type Counter struct {
 }
 
 const (
-	rawPattern    = "%9d | %x | %x | %x | %x | %12d | %12d"
-	fieldsPattern = "%9d | %x | %8d - %8d | %02x | %s | %12d | %5d | %s | %s | %02x | %12d | %2d | %2d | %6d | %s"
+	rawPattern    = "%6d | %x | %x | %x | %x | %12d | %12d"
+	fieldsPattern = "%6d | %7d - %7d | %02x | %s | %9d | %6d | %s | %s | %02x | %9d | %2d | %2d | %s"
 )
 
 func main() {
@@ -65,7 +65,7 @@ func main() {
 	case "raw":
 		hook = debugRaw
 	case "header":
-		hook = debugFields()
+		hook = debugHeaders(false)
 	default:
 	}
 
@@ -92,9 +92,8 @@ func debugRaw(i int, vs []byte) {
 	log.Printf(rawPattern, i, vs[:8], vs[8:24], vs[24:48], sum, z, len(vs)-12)
 }
 
-func debugFields() hookFunc {
+func debugHeaders(hrd bool) hookFunc {
 	deltas := make(map[uint8]uint32)
-	gaps := make(map[uint8]uint32)
 	return func(i int, vs []byte) {
 		// HRDL Frame Header
 		var (
@@ -132,7 +131,7 @@ func debugFields() hookFunc {
 		binary.Read(r, binary.LittleEndian, &origin)
 
 		at := GPS.Add(acqtime).Format("2006-01-02 15:04:05.000")
-		xt := GPS.Add(auxtime).Format("2006-01-02 15:04:05.000")
+		xt := GPS.Add(auxtime).Format("15:04:05.000")
 		vt := readTime6(coarse, fine).Add(Delta).Format("2006-01-02 15:04:05.000")
 
 		tp, st := property>>4, property&0xF
@@ -148,17 +147,17 @@ func debugFields() hookFunc {
 		default:
 			upi = "UNKNOWN"
 		}
+		k, s := channel, sequence
+		if hrd {
+			k, s = origin, counter
+		}
+		var delta uint64
+		if last, ok := deltas[k]; ok && last+1 != s {
+			delta = sequenceDelta(s, last)
+		}
+		deltas[k] = s
 
-		var delta, gap uint64
-		if prev, ok := deltas[origin]; ok && prev+1 != counter {
-			delta = sequenceDelta(counter, prev)
-		}
-		if prev, ok := gaps[channel]; ok && prev+1 != sequence {
-			gap = sequenceDelta(sequence, prev)
-		}
-		log.Printf(fieldsPattern, i, sync, size, len(vs)-12, channel, vt, sequence, gap, at, xt, origin, counter, tp, st, delta, upi)
-		deltas[origin] = counter
-		gaps[channel] = sequence
+		log.Printf(fieldsPattern, i, size+12, len(vs), channel, vt, sequence, delta, at, xt, origin, counter, tp, st, upi)
 	}
 }
 
@@ -303,12 +302,8 @@ func (r *reader) Read(bs []byte) (int, error) {
 	if _, err := io.ReadFull(r.rest, xs); err != nil {
 		return 0, err
 	}
-	if len(xs) > 8 && bytes.Equal(xs[:len(Word)], Word) {
-		if ix := bytes.Index(xs[len(Word):], Word); ix >= 0 {
-			n := copy(bs, xs[:ix+len(Word)])
-			r.rest.Write(xs[ix+len(Word):])
-			return n, nil
-		}
+	if n := r.copyHRDL(xs, bs); n > 0 {
+		return n, nil
 	}
 	for {
 		vs, err := r.readCadu()
@@ -322,13 +317,7 @@ func (r *reader) Read(bs []byte) (int, error) {
 		}
 	}
 	for {
-		offset := len(xs) - defaultOffset
-		if offset <= 0 {
-			offset = len(Word)
-		}
-		if ix := bytes.Index(xs[offset:], Word); ix >= 0 {
-			n := copy(bs, xs[:offset+ix])
-			r.rest.Write(xs[offset+ix:])
+		if n := r.copyHRDL(xs, bs); n > 0 {
 			return n, nil
 		}
 		vs, err := r.readCadu()
@@ -337,6 +326,28 @@ func (r *reader) Read(bs []byte) (int, error) {
 		}
 		xs = append(xs, vs...)
 	}
+}
+
+func (r *reader) copyHRDL(xs, bs []byte) int {
+	if len(xs) < 8 || !bytes.Equal(xs[:len(Word)], Word) {
+		return 0
+	}
+	offset := len(xs) - defaultOffset
+	if offset <= 0 {
+		offset = len(Word)
+	}
+	ix := bytes.Index(xs[offset:], Word)
+	if ix < 0 {
+		return 0
+	}
+	z := ix + offset
+	s := int(binary.LittleEndian.Uint32(xs[len(Word):])) + 12
+	if s > z  {
+		s = z
+	}
+	n := copy(bs, xs[:s])
+	r.rest.Write(xs[z:])
+	return n
 }
 
 func (r *reader) readCadu() ([]byte, error) {
