@@ -32,6 +32,8 @@ var (
 
 type hookFunc func(int, []byte)
 
+type byFunc func([]byte) (byte, int)
+
 type Coze struct {
 	Count   int
 	Size    int
@@ -56,6 +58,7 @@ const (
 func main() {
 	log.SetOutput(os.Stdout)
 	log.SetFlags(0)
+	kind := flag.String("by", "channel", "report by channel or origin")
 	debug := flag.String("debug", "", "dump packet headers")
 	hrdfe := flag.Bool("hrdfe", false, "hrdfe packet")
 	flag.Parse()
@@ -68,6 +71,19 @@ func main() {
 		hook = debugHeaders(false)
 	default:
 	}
+	var by byFunc
+	switch *kind {
+	case "channel":
+		by = func(vs []byte) (byte, int) {
+			return vs[8], 12
+		}
+	case "origin":
+		by = func(vs []byte) (byte, int) {
+			return vs[47], 27
+		}
+	default:
+		log.Fatalln("%s unsupported", *kind)
+	}
 
 	var rs []io.Reader
 	for _, a := range flag.Args() {
@@ -78,9 +94,23 @@ func main() {
 		defer r.Close()
 		rs = append(rs, r)
 	}
-	z, err := reassemble(io.MultiReader(rs...), *hrdfe, hook)
+	status, reports, err := reassemble(io.MultiReader(rs...), *hrdfe, by, hook)
 	if err != nil {
 		log.Fatalln(err)
+	}
+	log.Printf("status by %s(s):", *kind)
+	var z Coze
+	for b, c := range status {
+		z.Count += c.Count
+		z.Bad += c.Bad
+		z.Size += c.Size
+		log.Printf("%s %02x = %8d: %6d bad, %8d length error (big: %6d, small: %6d), %9dKB", *kind, b, c.Count, c.Bad, c.Bigger+c.Smaller, c.Bigger, c.Smaller, c.Size>>10)
+	}
+
+	log.Println()
+	log.Printf("sequence check by %s(s):", *kind)
+	for b, c := range reports {
+		log.Printf("%s %02x: first: %10d - last: %10d - missing: %10d", *kind, b, c.First, c.Last, c.Missing)
 	}
 	log.Println()
 	log.Printf("%d VMU packets (%d bad, %dKB)", z.Count, z.Bad, z.Size>>10)
@@ -174,38 +204,34 @@ var (
 	ErrMultiple = errors.New("multiple syncword")
 )
 
-func reassemble(r io.Reader, hrdfe bool, hook hookFunc) (*Coze, error) {
+func reassemble(r io.Reader, hrdfe bool, by byFunc, hook hookFunc) (map[byte]*Coze, map[byte]*Counter, error) {
 	rs := NewReader(r, hrdfe)
 
-	var z Coze
-	counts := make(map[byte]*Coze)
-	origins := make(map[byte]*Counter)
-	channels := make(map[byte]*Counter)
+	status := make(map[byte]*Coze)
+	reports := make(map[byte]*Counter)
 
 	xs := make([]byte, 8<<20)
 	for i := 1; ; i++ {
 		n, err := rs.Read(xs)
 		if err != nil && err != io.EOF {
-			return nil, err
+			return nil, nil, err
 		}
 		if n == 0 || err == io.EOF {
 			break
 		}
 		vs := xs[:n]
 		if !bytes.Equal(vs[:len(Word)], Word) {
-			return nil, ErrSyncword
+			return nil, nil, ErrSyncword
 		}
 		if i := bytes.Index(vs, Word); i >= len(Word) {
-			return nil, ErrMultiple
+			return nil, nil, ErrMultiple
 		}
 		if hook != nil {
 			hook(i, vs)
 		}
-		z.Count++
-		z.Size += n
 
-		// count per origin
-		c, ok := counts[vs[47]]
+		k, six := by(vs)
+		c, ok := status[k]
 		if !ok {
 			c = &Coze{}
 		}
@@ -218,7 +244,6 @@ func reassemble(r io.Reader, hrdfe bool, hook hookFunc) (*Coze, error) {
 		}
 		if sum != binary.LittleEndian.Uint32(vs[len(vs)-4:]) {
 			c.Bad++
-			z.Bad++
 		}
 		switch z, n := binary.LittleEndian.Uint32(vs[4:]), len(vs)-12; {
 		default:
@@ -227,52 +252,26 @@ func reassemble(r io.Reader, hrdfe bool, hook hookFunc) (*Coze, error) {
 		case int(z) < n:
 			c.Bigger++
 		}
-		counts[vs[47]] = c
+		status[k] = c
 
-		// check missing vmu packets
-		v, ok := channels[vs[8]]
-		if vmuseq := binary.LittleEndian.Uint32(vs[12:]); !ok {
-			v = &Counter{First: vmuseq, Last: vmuseq}
+		v, ok := reports[k]
+		if seq := binary.LittleEndian.Uint32(vs[six:]); !ok {
+			v = &Counter{First: seq, Last: seq}
 		} else {
-			v.Missing += sequenceDelta(vmuseq, v.Last)
-			v.Last = vmuseq
+			v.Missing += sequenceDelta(seq, v.Last)
+			v.Last = seq
 		}
 		v.Count++
-		// v.Size += len(vs)
-		channels[vs[8]] = v
-
-		// check missing hrd packets by origins
-		o, ok := origins[vs[47]]
-		if oriseq := binary.LittleEndian.Uint32(vs[27:]); !ok {
-			o = &Counter{First: oriseq, Last: oriseq}
-		} else {
-			o.Missing += sequenceDelta(oriseq, o.Last)
-			o.Last = oriseq
-		}
-		origins[vs[47]] = o
+		reports[k] = v
 	}
-	log.Println("count packets by origin")
-	for b, c := range counts {
-		log.Printf("origin %02x = %8d: %6d bad, %8d length error (big: %6d, small: %6d), %9dKB", b, c.Count, c.Bad, c.Bigger+c.Smaller, c.Bigger, c.Smaller, c.Size>>10)
-	}
-	log.Println()
-	log.Println("sequence check by origin")
-	for b, c := range origins {
-		log.Printf("origin %02x: first: %10d - last: %10d - missing: %10d", b, c.First, c.Last, c.Missing)
-	}
-	log.Println()
-	log.Println("sequence check by channel")
-	for b, c := range channels {
-		log.Printf("channel %02x: first: %10d - last: %10d - missing: %10d", b, c.First, c.Last, c.Missing)
-	}
-	return &z, nil
+	return status, reports, nil
 }
 
 func sequenceDelta(current, last uint32) uint64 {
-	if current == last + 1 {
+	if current == last+1 {
 		return 0
 	}
-	if current > last{
+	if current > last {
 		return uint64(current) - uint64(last)
 	}
 	return 0
@@ -342,7 +341,7 @@ func (r *reader) copyHRDL(xs, bs []byte) int {
 	}
 	z := ix + offset
 	s := int(binary.LittleEndian.Uint32(xs[len(Word):])) + 12
-	if s > z  {
+	if s > z {
 		s = z
 	}
 	n := copy(bs, xs[:s])
