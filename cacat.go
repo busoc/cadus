@@ -32,7 +32,7 @@ var (
 
 type hookFunc func(int, []byte)
 
-type byFunc func([]byte) (byte, int)
+type byFunc func([]byte) (uint16, int)
 
 type Coze struct {
 	Count   int
@@ -52,7 +52,7 @@ type Counter struct {
 
 const (
 	rawPattern    = "%6d | %x | %x | %x | %x | %12d | %12d"
-	fieldsPattern = "%6d | %7d - %7d | %02x | %s | %9d | %6d | %s | %s | %02x | %9d | %2d | %2d | %s"
+	fieldsPattern = "%6d | %7d - %7d | %02x | %s | %9d | %6d | %s | %s | %02x | %02x | %9d | %2d | %2d | %s"
 )
 
 func main() {
@@ -74,12 +74,12 @@ func main() {
 	var by byFunc
 	switch *kind {
 	case "channel":
-		by = func(vs []byte) (byte, int) {
-			return vs[8], 12
+		by = func(vs []byte) (uint16, int) {
+			return uint16(vs[8]), 12
 		}
 	case "origin":
-		by = func(vs []byte) (byte, int) {
-			return vs[47], 27
+		by = func(vs []byte) (uint16, int) {
+			return uint16(vs[9]) << 8 | uint16(vs[47]), 27
 		}
 	default:
 		log.Fatalln("%s unsupported", *kind)
@@ -98,19 +98,33 @@ func main() {
 	if err != nil {
 		log.Fatalln(err)
 	}
-	log.Printf("status by %s(s):", *kind)
+	printReports(*kind, status, reports)
+}
+
+func printReports(kind string, status map[uint16]*Coze, reports map[uint16]*Counter) {
+	log.Printf("status by %s(s):", kind)
 	var z Coze
 	for b, c := range status {
 		z.Count += c.Count
 		z.Bad += c.Bad
 		z.Size += c.Size
-		log.Printf("%s %02x = %8d: %6d bad, %8d length error (big: %6d, small: %6d), %9dKB", *kind, b, c.Count, c.Bad, c.Bigger+c.Smaller, c.Bigger, c.Smaller, c.Size>>10)
+
+		mode := "rt"
+		if m := b>>8; m >= 0x61 && m <= 0x66 {
+			mode = "pb"
+		}
+
+		log.Printf("%s(%s) %02x = %8d: %6d bad, %8d length error (big: %6d, small: %6d), %9dKB", kind, mode, b&0xFF, c.Count, c.Bad, c.Bigger+c.Smaller, c.Bigger, c.Smaller, c.Size>>10)
 	}
 
 	log.Println()
-	log.Printf("sequence check by %s(s):", *kind)
+	log.Printf("sequence check by %s(s):", kind)
 	for b, c := range reports {
-		log.Printf("%s %02x: first: %10d - last: %10d - missing: %10d", *kind, b, c.First, c.Last, c.Missing)
+		mode := "rt"
+		if m := b>>8; m >= 0x61 && m <= 0x66 {
+			mode = "pb"
+		}
+		log.Printf("%s(%s) %02x: first: %10d - last: %10d - missing: %10d", kind, mode, b&0xFF, c.First, c.Last, c.Missing)
 	}
 	log.Println()
 	log.Printf("%d VMU packets (%d bad, %dKB)", z.Count, z.Bad, z.Size>>10)
@@ -187,7 +201,7 @@ func debugHeaders(hrd bool) hookFunc {
 		}
 		deltas[k] = s
 
-		log.Printf(fieldsPattern, i, size+12, len(vs), channel, vt, sequence, delta, at, xt, origin, counter, tp, st, upi)
+		log.Printf(fieldsPattern, i, size+12, len(vs), channel, vt, sequence, delta, at, xt, source, origin, counter, tp, st, upi)
 	}
 }
 
@@ -204,11 +218,11 @@ var (
 	ErrMultiple = errors.New("multiple syncword")
 )
 
-func reassemble(r io.Reader, hrdfe bool, by byFunc, hook hookFunc) (map[byte]*Coze, map[byte]*Counter, error) {
+func reassemble(r io.Reader, hrdfe bool, by byFunc, hook hookFunc) (map[uint16]*Coze, map[uint16]*Counter, error) {
 	rs := NewReader(r, hrdfe)
 
-	status := make(map[byte]*Coze)
-	reports := make(map[byte]*Counter)
+	status := make(map[uint16]*Coze)
+	reports := make(map[uint16]*Counter)
 
 	xs := make([]byte, 8<<20)
 	for i := 1; ; i++ {
