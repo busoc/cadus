@@ -28,6 +28,7 @@ var (
 var (
 	empty = make([]byte, caduBodyLen)
 	Word  = []byte{0xf8, 0x2e, 0x35, 0x53}
+	Stuff = []byte{0xf8, 0x2e, 0x35, 0xaa}
 )
 
 type hookFunc func(int, []byte)
@@ -325,7 +326,8 @@ func (r *reader) Read(bs []byte) (int, error) {
 		}
 		xs = append(xs, vs...)
 		if ix := bytes.Index(xs, Word); ix >= 0 {
-			xs = xs[ix:]
+			xs = bytes.Replace(xs[ix:], Stuff, Word[:3], -1)
+			// xs = xs[ix:]
 			break
 		}
 	}
@@ -338,6 +340,11 @@ func (r *reader) Read(bs []byte) (int, error) {
 			return 0, err
 		}
 		xs = append(xs, vs...)
+		offset := len(xs) - caduPacketLen
+		if offset < 0 {
+			offset = 0
+		}
+		copy(xs[offset:], bytes.Replace(xs[offset:], Stuff, Word[:3], -1))
 	}
 }
 
@@ -358,8 +365,8 @@ func (r *reader) copyHRDL(xs, bs []byte) int {
 	if s > z {
 		s = z
 	}
-	ns := bytes.Replace(xs[:s], []byte{0xf8, 0x2e, 0x35, 0xaa}, []byte{0xf8, 0x2e, 0x35}, -1)
-	n := copy(bs, ns)
+	// ns := bytes.Replace(xs[:s], []byte{0xf8, 0x2e, 0x35, 0xaa}, []byte{0xf8, 0x2e, 0x35}, -1)
+	n := copy(bs, xs[:s])
 	r.rest.Write(xs[z:])
 	return n
 }
