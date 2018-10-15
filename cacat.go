@@ -52,7 +52,7 @@ type Counter struct {
 
 const (
 	rawPattern    = "%6d | %x | %x | %x | %x | %12d | %12d"
-	fieldsPattern = "%6d | %7d - %7d | %02x | %s | %9d | %6d | %s | %s | %02x | %02x | %9d | %2d | %2d | %s"
+	fieldsPattern = "%6d | %7d | %02x | %s | %9d | %6d | %s | %s | %02x | %02x | %7d | %2d | %2d | %s"
 )
 
 func main() {
@@ -201,7 +201,7 @@ func debugHeaders(hrd bool) hookFunc {
 		}
 		deltas[k] = s
 
-		log.Printf(fieldsPattern, i, size+12, len(vs), channel, vt, sequence, delta, at, xt, source, origin, counter, tp, st, upi)
+		log.Printf(fieldsPattern, i, size, channel, vt, sequence, delta, at, xt, source, origin, counter, tp, st, upi)
 	}
 }
 
@@ -358,7 +358,8 @@ func (r *reader) copyHRDL(xs, bs []byte) int {
 	if s > z {
 		s = z
 	}
-	n := copy(bs, xs[:s])
+	ns := bytes.Replace(xs[:s], []byte{0xf8, 0x2e, 0x35, 0xaa}, []byte{0xf8, 0x2e, 0x35}, -1)
+	n := copy(bs, ns)
 	r.rest.Write(xs[z:])
 	return n
 }
