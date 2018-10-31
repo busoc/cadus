@@ -17,7 +17,7 @@ import (
 const (
 	pcapHeaderLen   = 24
 	pktHeaderLen    = 16
-	cookedHeaderLen = 16
+	cookedHeaderLen = 14
 	ipHeaderLen     = 20
 	udpHeaderLen    = 8
 	tcpHeaderLen    = 32
@@ -77,7 +77,7 @@ func (c *Cadu) Missing(p *Cadu) uint32 {
 	if p.Sequence > c.Sequence {
 		return p.Missing(c)
 	}
-	if delta := (c.Sequence - p.Sequence) & 0xFFF; delta > 1 {
+	if delta := (c.Sequence - p.Sequence) & 0xFFFFFF; delta > 1 {
 		return delta
 	}
 	return 0
