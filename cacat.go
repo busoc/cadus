@@ -80,7 +80,7 @@ func main() {
 		}
 	case "origin":
 		by = func(vs []byte) (uint16, int) {
-			return uint16(vs[9]) << 8 | uint16(vs[47]), 27
+			return uint16(vs[9])<<8 | uint16(vs[47]), 27
 		}
 	default:
 		log.Fatalln("%s unsupported", *kind)
@@ -111,7 +111,7 @@ func printReports(kind string, status map[uint16]*Coze, reports map[uint16]*Coun
 		z.Size += c.Size
 
 		mode := "rt"
-		if m := b>>8; m >= 0x61 && m <= 0x66 {
+		if m := b >> 8; m >= 0x61 && m <= 0x66 {
 			mode = "pb"
 		}
 
@@ -122,7 +122,7 @@ func printReports(kind string, status map[uint16]*Coze, reports map[uint16]*Coun
 	log.Printf("sequence check by %s(s):", kind)
 	for b, c := range reports {
 		mode := "rt"
-		if m := b>>8; m >= 0x61 && m <= 0x66 {
+		if m := b >> 8; m >= 0x61 && m <= 0x66 {
 			mode = "pb"
 		}
 		log.Printf("%s(%s) %02x: first: %10d - last: %10d - missing: %10d", kind, mode, b&0xFF, c.First, c.Last, c.Missing)
